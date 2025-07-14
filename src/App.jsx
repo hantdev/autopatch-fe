@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { getApiUrl, API_CONFIG } from './config/api';
 import './App.css';
 
@@ -13,6 +13,8 @@ export default function App() {
   const [osFilter, setOsFilter] = useState('all');
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
+  const [isPatching, setIsPatching] = useState(false);
+  const [patchingStatus, setPatchingStatus] = useState({});
 
   const fetchServers = async () => {
     setLoading(true);
@@ -74,6 +76,71 @@ export default function App() {
     }
     setCveLoading(false);
   };
+
+  const handleRunPatch = async () => {
+    if (selected.length === 0) return;
+
+    setIsPatching(true);
+    setError('');
+    try {
+      const res = await fetch(getApiUrl(API_CONFIG.ENDPOINTS.START_PATCH), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instance_ids: selected })
+      });
+
+      const data = await res.json();
+      if (data.statusCode !== 200) throw new Error("Failed to start patch");
+
+      console.log("Patch execution started:", data.body);
+
+    } catch (e) {
+      setError('Lỗi khi bắt đầu patch: ' + e.message);
+      setIsPatching(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isPatching) return;
+
+    const interval = setInterval(async () => {
+      let allCompleted = true;
+
+      for (const instanceId of selected) {
+        try {
+          const res = await fetch(getApiUrl(API_CONFIG.ENDPOINTS.GET_STATUS), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ instance_id: instanceId })
+          });
+
+          const data = await res.json();
+          if (data.statusCode === 200) {
+            const body = JSON.parse(data.body);
+            setPatchingStatus(prev => ({
+              ...prev,
+              [instanceId]: body
+            }));
+
+            // Nếu vẫn còn chưa hoàn tất → tiếp tục polling
+            if (body.percentage < 100) {
+              allCompleted = false;
+            }
+          }
+        } catch (err) {
+          console.error('Lỗi polling status:', err);
+        }
+      }
+
+      // Dừng polling nếu tất cả đều xong
+      if (allCompleted) {
+        clearInterval(interval);
+        setIsPatching(false);
+      }
+    }, 20000); // mỗi 20s
+
+    return () => clearInterval(interval);
+  }, [isPatching]);
 
   const selectedCount = selected.length;
   const totalCount = servers.length;
@@ -272,7 +339,7 @@ export default function App() {
           <div className="bg-white shadow overflow-hidden sm:rounded-md">
             <div className="px-4 py-5 sm:px-6 border-b border-gray-200">
               <div className="flex items-center justify-between">
-      <div>
+                <div>
                   <h3 className="text-lg leading-6 font-medium text-gray-900">Danh sách Server</h3>
                   <p className="mt-1 max-w-2xl text-sm text-gray-500">Thông tin chi tiết về các server trong hệ thống</p>
                 </div>
@@ -358,7 +425,7 @@ export default function App() {
               </table>
       </div>
             
-            <div className="px-4 py-4 sm:px-6 bg-gray-50 border-t border-gray-200">
+            <div className="px-4 py-4 sm:px-6 bg-gray-50 border-t border-gray-200 flex flex-wrap items-center gap-3">
               <button
                 onClick={handleParseCVE}
                 disabled={selected.length === 0 || cveLoading}
@@ -380,7 +447,14 @@ export default function App() {
                     Phân tích CVE ({selectedCount} server)
                   </>
                 )}
-        </button>
+              </button>
+              <button
+                onClick={handleRunPatch}
+                disabled={selected.length === 0 || !cveResult || isPatching}
+                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-yellow-600 hover:bg-yellow-700 disabled:opacity-50"
+              >
+                {isPatching ? 'Đang chạy...' : `Run Patch KB (${selectedCount})`}
+              </button>
             </div>
           </div>
         )}
@@ -504,7 +578,7 @@ export default function App() {
                       Hiển thị {startIndex + 1} đến {Math.min(endIndex, filteredCVE.length)} trong tổng số {filteredCVE.length} CVE
                     </div>
                   </div>
-                  
+                  {/* Dynamic Pagination Numbers */}
                   <div className="flex items-center space-x-2">
                     <button
                       onClick={() => handlePageChange(currentPage - 1)}
@@ -515,10 +589,21 @@ export default function App() {
                         <path fillRule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clipRule="evenodd" />
                       </svg>
                     </button>
-                    
-                    {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
-                      const page = i + 1;
-                      return (
+                    {(() => {
+                      let startPage = Math.max(1, currentPage - 2);
+                      let endPage = Math.min(totalPages, currentPage + 2);
+                      if (endPage - startPage < 4) {
+                        if (startPage === 1) {
+                          endPage = Math.min(totalPages, startPage + 4);
+                        } else if (endPage === totalPages) {
+                          startPage = Math.max(1, endPage - 4);
+                        }
+                      }
+                      const pageNumbers = [];
+                      for (let i = startPage; i <= endPage; i++) {
+                        pageNumbers.push(i);
+                      }
+                      return pageNumbers.map(page => (
                         <button
                           key={page}
                           onClick={() => handlePageChange(page)}
@@ -530,9 +615,8 @@ export default function App() {
                         >
                           {page}
                         </button>
-                      );
-                    })}
-                    
+                      ));
+                    })()}
                     <button
                       onClick={() => handlePageChange(currentPage + 1)}
                       disabled={currentPage === totalPages}
@@ -548,6 +632,74 @@ export default function App() {
             )}
           </div>
         )}
+
+        {Object.entries(patchingStatus).map(([instanceId, status]) => (
+  <div key={instanceId} className="mt-8 p-6 border border-gray-200 rounded-xl bg-white shadow-md">
+    <div className="flex items-center mb-3">
+      <div className="flex-shrink-0 w-10 h-10 rounded-full bg-indigo-100 flex items-center justify-center mr-4">
+        <svg className="w-6 h-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+        </svg>
+      </div>
+      <div>
+        <h4 className="text-base font-semibold text-gray-800 mb-1">
+          Server <span className="font-mono text-indigo-700">{instanceId}</span>
+        </h4>
+        <div className="flex items-center space-x-2">
+          <span className="text-xs text-gray-500">Tiến độ:</span>
+          <div className="w-40 bg-gray-100 rounded-full h-2.5 overflow-hidden">
+            <div
+              className="bg-green-500 h-2.5 rounded-full transition-all duration-500"
+              style={{ width: `${status.percentage}%` }}
+            ></div>
+          </div>
+          <span className="text-xs font-semibold text-green-700">{status.percentage}%</span>
+        </div>
+      </div>
+    </div>
+    <div className="overflow-x-auto">
+      <table className="min-w-full text-sm mt-4">
+        <thead>
+          <tr className="bg-gray-50">
+            <th className="px-4 py-2 text-left font-medium text-gray-500 uppercase tracking-wider">KB</th>
+            <th className="px-4 py-2 text-left font-medium text-gray-500 uppercase tracking-wider">Trạng thái</th>
+          </tr>
+        </thead>
+        <tbody>
+          {status.details.map((kb, idx) => (
+            <tr key={idx} className="border-b last:border-b-0 hover:bg-gray-50">
+              <td className="px-4 py-2 font-mono text-indigo-700">KB{kb.KB}</td>
+              <td className="px-4 py-2">
+                <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold space-x-1
+                  ${kb.Status === 'Success' ? 'bg-green-100 text-green-700' :
+                    kb.Status === 'Failed' ? 'bg-red-100 text-red-700' :
+                    'bg-yellow-100 text-yellow-700'}`}
+                >
+                  {kb.Status === 'Success' && (
+                    <svg className="w-4 h-4 mr-1 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                    </svg>
+                  )}
+                  {kb.Status === 'Failed' && (
+                    <svg className="w-4 h-4 mr-1 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  )}
+                  {kb.Status !== 'Success' && kb.Status !== 'Failed' && (
+                    <svg className="w-4 h-4 mr-1 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01" />
+                    </svg>
+                  )}
+                  <span>{kb.Status}</span>
+                </span>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  </div>
+))}
 
         {/* Empty State */}
         {servers.length === 0 && !loading && (
