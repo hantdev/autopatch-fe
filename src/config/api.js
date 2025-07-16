@@ -7,6 +7,7 @@ export const API_CONFIG = {
     GET_STATUS: '/get-patch-status',
     UPDATE_CVE: '/update-cve',
     REBOOT_SERVER: '/reboot-server',
+    START_PATCH_SINGLE_KB: '/start-patch-single-kb',
   }
 };
 

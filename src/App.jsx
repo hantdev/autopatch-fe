@@ -18,6 +18,7 @@ export default function App() {
   const [isUpdatingCVE, setIsUpdatingCVE] = useState(false);
   const [isRebooting, setIsRebooting] = useState(false);
   const [updateCVESummary, setUpdateCVESummary] = useState(null);
+  const [singleKbPatchLoading, setSingleKbPatchLoading] = useState({});
 
   const fetchServers = async () => {
     setLoading(true);
@@ -235,13 +236,14 @@ export default function App() {
 
   // Handler for rebooting servers
   const handleRebootServer = async () => {
+    if (!selected || selected.length === 0) return;
     setIsRebooting(true);
     setError('');
     try {
       const res = await fetch(getApiUrl(API_CONFIG.ENDPOINTS.REBOOT_SERVER), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ instanceIds: selected }),
+        body: JSON.stringify({ instance_ids: selected }),
       });
       const data = await res.json();
       if (data.statusCode === 200) {
@@ -254,6 +256,25 @@ export default function App() {
       setError('Lỗi kết nối API khi reboot server');
     }
     setIsRebooting(false);
+  };
+
+  // Handler for running patch for a single KB
+  const handleRunPatchSingleKB = async (instanceId, kb) => {
+    setSingleKbPatchLoading(prev => ({ ...prev, [`${instanceId}_${kb}`]: true }));
+    setError('');
+    try {
+      const res = await fetch(getApiUrl(API_CONFIG.ENDPOINTS.START_PATCH_SINGLE_KB), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instance_id: instanceId, kb }),
+      });
+      const data = await res.json();
+      // Optionally, you can refresh status or show a message
+      // fetchServers();
+    } catch (e) {
+      setError('Lỗi khi chạy lại patch KB');
+    }
+    setSingleKbPatchLoading(prev => ({ ...prev, [`${instanceId}_${kb}`]: false }));
   };
 
   const selectedCount = selected.length;
@@ -876,8 +897,9 @@ export default function App() {
                       <td className="px-4 py-2">
                         <div className="flex items-center space-x-2">
                           <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold space-x-1
-                            ${kb.Status === 'Success' || kb.Status === 'Already Installed' ? 'bg-green-100 text-green-700' :
+                            ${(kb.Status === 'Success' || kb.Status === 'Already Installed') ? 'bg-green-100 text-green-700' :
                               kb.Status === 'Failed' ? 'bg-red-100 text-red-700' :
+                              kb.Status === 'not available' ? 'bg-yellow-100 text-yellow-700' :
                               'bg-yellow-100 text-yellow-700'}`}
                           >
                             {(kb.Status === 'Success' || kb.Status === 'Already Installed') && (
@@ -890,21 +912,33 @@ export default function App() {
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                               </svg>
                             )}
-                            {kb.Status !== 'Success' && kb.Status !== 'Failed' && kb.Status !== 'Already Installed' && (
+                            {kb.Status === 'not available' && (
+                              <svg className="w-4 h-4 mr-1 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01" />
+                              </svg>
+                            )}
+                            {kb.Status !== 'Success' && kb.Status !== 'Failed' && kb.Status !== 'Already Installed' && kb.Status !== 'not available' && (
                               <svg className="w-4 h-4 mr-1 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01" />
                               </svg>
                             )}
                             <span>{kb.Status}</span>
                           </span>
-
-                          {kb.RebootRequired && (
-                            <span
-                              title="Reboot required"
-                              className="text-xs text-red-600 bg-red-100 rounded px-2 py-0.5 font-semibold flex items-center"
+                          {/* Button Run Patch KB nếu status là Failed */}
+                          {kb.Status === 'Failed' && (
+                            <button
+                              onClick={() => handleRunPatchSingleKB(instanceId, kb.KB)}
+                              disabled={singleKbPatchLoading[`${instanceId}_${kb.KB}`]}
+                              className="ml-2 inline-flex items-center px-2 py-1 border border-transparent text-xs font-medium rounded bg-yellow-500 text-white hover:bg-yellow-600 disabled:opacity-50"
                             >
-                              🔁 Reboot
-                            </span>
+                              {singleKbPatchLoading[`${instanceId}_${kb.KB}`] ? (
+                                <svg className="animate-spin h-4 w-4 mr-1 text-white" fill="none" viewBox="0 0 24 24">
+                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                </svg>
+                              ) : null}
+                              Retry Run Patch KB
+                            </button>
                           )}
                         </div>
                       </td>
