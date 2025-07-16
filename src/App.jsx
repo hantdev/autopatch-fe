@@ -15,6 +15,9 @@ export default function App() {
   const [pageSize, setPageSize] = useState(10);
   const [isPatching, setIsPatching] = useState(false);
   const [patchingStatus, setPatchingStatus] = useState({});
+  const [isUpdatingCVE, setIsUpdatingCVE] = useState(false);
+  const [isRebooting, setIsRebooting] = useState(false);
+  const [updateCVESummary, setUpdateCVESummary] = useState(null);
 
   const fetchServers = async () => {
     setLoading(true);
@@ -28,7 +31,13 @@ export default function App() {
       });
       const data = await res.json();
       if (data.statusCode === 200) {
-        setServers(JSON.parse(data.body));
+        const newServers = JSON.parse(data.body);
+        setServers(newServers);
+        // Giữ lại các server đã chọn nếu còn tồn tại
+        setSelected((prevSelected) => {
+          const newIds = newServers.map(s => s.InstanceId);
+          return prevSelected.filter(id => newIds.includes(id));
+        });
       } else {
         setError('Lỗi khi lấy danh sách server');
       }
@@ -103,10 +112,14 @@ export default function App() {
   useEffect(() => {
     if (!isPatching) return;
 
+    // Track which instanceIds are still being polled
+    let activeInstanceIds = [...selected];
+
     const interval = setInterval(async () => {
       let allCompleted = true;
+      let newActiveInstanceIds = [];
 
-      for (const instanceId of selected) {
+      for (const instanceId of activeInstanceIds) {
         try {
           const res = await fetch(getApiUrl(API_CONFIG.ENDPOINTS.GET_STATUS), {
             method: 'POST',
@@ -117,13 +130,58 @@ export default function App() {
           const data = await res.json();
           if (data.statusCode === 200) {
             const body = JSON.parse(data.body);
-            setPatchingStatus(prev => ({
-              ...prev,
-              [instanceId]: body
-            }));
-
-            // Nếu vẫn còn chưa hoàn tất → tiếp tục polling
-            if (body.percentage < 100) {
+            // Nếu API trả về percentage thì ưu tiên dùng
+            let percent = 0;
+            if (typeof body.percentage === 'number') {
+              percent = body.percentage;
+            } else {
+              // Tính tiến độ dựa trên số KB Success hoặc Already Installed
+              let totalKB = 0;
+              let doneKB = 0;
+              if (Array.isArray(body.details)) {
+                totalKB = body.details.length;
+                for (const kb of body.details) {
+                  if (kb.Status === 'Success' || kb.Status === 'Already Installed') {
+                    doneKB++;
+                  }
+                }
+              }
+              percent = totalKB > 0 ? Math.round((doneKB / totalKB) * 100) : 0;
+            }
+            // Kiểm tra trạng thái từng KB
+            let isCompleted = true;
+            let isFailed = false;
+            if (Array.isArray(body.details)) {
+              for (const kb of body.details) {
+                if (kb.Status === 'not available') {
+                  isFailed = true;
+                  break;
+                }
+                if (kb.Status !== 'Success' && kb.Status !== 'Already Installed') {
+                  isCompleted = false;
+                }
+              }
+            }
+            // Nếu có not available thì fail và dừng polling instance này
+            if (isFailed) {
+              setPatchingStatus(prev => ({
+                ...prev,
+                [instanceId]: { ...body, percentage: 0, failed: true }
+              }));
+              continue; // Không thêm vào newActiveInstanceIds
+            }
+            // Nếu tất cả đều Success hoặc Already Installed thì hoàn thành
+            if (isCompleted) {
+              setPatchingStatus(prev => ({
+                ...prev,
+                [instanceId]: { ...body, percentage: 100 }
+              }));
+            } else {
+              setPatchingStatus(prev => ({
+                ...prev,
+                [instanceId]: { ...body, percentage: percent }
+              }));
+              newActiveInstanceIds.push(instanceId);
               allCompleted = false;
             }
           }
@@ -132,8 +190,10 @@ export default function App() {
         }
       }
 
-      // Dừng polling nếu tất cả đều xong
-      if (allCompleted) {
+      activeInstanceIds = newActiveInstanceIds;
+
+      // Dừng polling nếu tất cả đều xong hoặc không còn instance nào cần polling
+      if (allCompleted || activeInstanceIds.length === 0) {
         clearInterval(interval);
         setIsPatching(false);
       }
@@ -141,6 +201,60 @@ export default function App() {
 
     return () => clearInterval(interval);
   }, [isPatching]);
+
+  // Handler for updating CVE
+  const handleUpdateCVE = async () => {
+    setIsUpdatingCVE(true);
+    setError('');
+    setUpdateCVESummary(null);
+    try {
+      const res = await fetch(getApiUrl(API_CONFIG.ENDPOINTS.UPDATE_CVE), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instanceIds: selected }),
+      });
+      const data = await res.json();
+      if (data.statusCode === 200) {
+        // Parse and show summary
+        let parsed;
+        try {
+          parsed = typeof data.body === 'string' ? JSON.parse(data.body) : data.body;
+        } catch (e) {
+          parsed = null;
+        }
+        setUpdateCVESummary(parsed);
+        fetchServers();
+      } else {
+        setError('Lỗi khi cập nhật CVE mới nhất');
+      }
+    } catch (e) {
+      setError('Lỗi kết nối API khi cập nhật CVE');
+    }
+    setIsUpdatingCVE(false);
+  };
+
+  // Handler for rebooting servers
+  const handleRebootServer = async () => {
+    setIsRebooting(true);
+    setError('');
+    try {
+      const res = await fetch(getApiUrl(API_CONFIG.ENDPOINTS.REBOOT_SERVER), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instanceIds: selected }),
+      });
+      const data = await res.json();
+      if (data.statusCode === 200) {
+        // Optionally, show a success message or refresh data
+        fetchServers();
+      } else {
+        setError('Lỗi khi reboot server');
+      }
+    } catch (e) {
+      setError('Lỗi kết nối API khi reboot server');
+    }
+    setIsRebooting(false);
+  };
 
   const selectedCount = selected.length;
   const totalCount = servers.length;
@@ -424,8 +538,32 @@ export default function App() {
                 </tbody>
               </table>
       </div>
-            
+
             <div className="px-4 py-4 sm:px-6 bg-gray-50 border-t border-gray-200 flex flex-wrap items-center gap-3">
+              {/* Update CVE Button */}
+              <button
+                onClick={handleUpdateCVE}
+                disabled={isUpdatingCVE || selected.length === 0}
+                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200"
+              >
+                {isUpdatingCVE ? (
+                  <>
+                    <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Đang cập nhật CVE...
+                  </>
+                ) : (
+                  <>
+                    <svg className="-ml-1 mr-2 h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v16m16-8H4" />
+                    </svg>
+                    Cập nhật CVE mới nhất ({selectedCount} server)
+                  </>
+                )}
+              </button>
+              {/* Phân tích CVE Button */}
               <button
                 onClick={handleParseCVE}
                 disabled={selected.length === 0 || cveLoading}
@@ -448,6 +586,7 @@ export default function App() {
                   </>
                 )}
               </button>
+              {/* Run Patch Button */}
               <button
                 onClick={handleRunPatch}
                 disabled={selected.length === 0 || !cveResult || isPatching}
@@ -455,7 +594,72 @@ export default function App() {
               >
                 {isPatching ? 'Đang chạy...' : `Run Patch KB (${selectedCount})`}
               </button>
+              {/* Reboot Server Button - only show if patching is complete and at least one server is selected */}
+              {!isPatching && cveResult && selected.length > 0 && (
+                <button
+                  onClick={handleRebootServer}
+                  disabled={isRebooting || selected.length === 0}
+                  className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200"
+                >
+                  {isRebooting ? (
+                    <>
+                      <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Đang reboot server...
+                    </>
+                  ) : (
+                    <>
+                      <svg className="-ml-1 mr-2 h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v16m16-8H4" />
+                      </svg>
+                      Reboot {selectedCount} server
+                    </>
+                  )}
+                </button>
+              )}
             </div>
+            {/* Show Update CVE Summary if available */}
+            {updateCVESummary && (
+              <div className="w-full mt-4 bg-blue-50 border border-blue-200 rounded-lg p-4">
+                <h4 className="font-semibold text-blue-800 mb-2">Kết quả cập nhật CVE</h4>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-sm mb-2">
+                    <thead>
+                      <tr className="bg-blue-100">
+                        <th className="px-3 py-2 text-left font-medium text-blue-700">Instance ID</th>
+                        <th className="px-3 py-2 text-left font-medium text-blue-700">OS Name</th>
+                        <th className="px-3 py-2 text-left font-medium text-blue-700">Total Fetched</th>
+                        <th className="px-3 py-2 text-left font-medium text-blue-700">Filtered Processed</th>
+                        <th className="px-3 py-2 text-left font-medium text-blue-700">Saved to DynamoDB</th>
+                        <th className="px-3 py-2 text-left font-medium text-blue-700">Errors</th>
+                        <th className="px-3 py-2 text-left font-medium text-blue-700">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {updateCVESummary.summary && updateCVESummary.summary.map((item, idx) => (
+                        <tr key={idx} className="border-b last:border-b-0 hover:bg-blue-100">
+                          <td className="px-3 py-2 font-mono text-blue-900">{item.instanceId}</td>
+                          <td className="px-3 py-2">{item.osName}</td>
+                          <td className="px-3 py-2">{item.totalFetched}</td>
+                          <td className="px-3 py-2">{item.filteredProcessed}</td>
+                          <td className="px-3 py-2">{item.savedToDynamoDB}</td>
+                          <td className="px-3 py-2">{item.errors}</td>
+                          <td className="px-3 py-2 font-semibold">{item.status}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {updateCVESummary.timeRange && (
+                    <div className="text-xs text-blue-700 mt-2">
+                      <span className="font-semibold">Thời gian:</span> {updateCVESummary.timeRange.start} → {updateCVESummary.timeRange.end}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+            
           </div>
         )}
 
@@ -665,37 +869,48 @@ export default function App() {
             <th className="px-4 py-2 text-left font-medium text-gray-500 uppercase tracking-wider">Trạng thái</th>
           </tr>
         </thead>
-        <tbody>
-          {status.details.map((kb, idx) => (
-            <tr key={idx} className="border-b last:border-b-0 hover:bg-gray-50">
-              <td className="px-4 py-2 font-mono text-indigo-700">KB{kb.KB}</td>
-              <td className="px-4 py-2">
-                <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold space-x-1
-                  ${kb.Status === 'Success' ? 'bg-green-100 text-green-700' :
-                    kb.Status === 'Failed' ? 'bg-red-100 text-red-700' :
-                    'bg-yellow-100 text-yellow-700'}`}
-                >
-                  {kb.Status === 'Success' && (
-                    <svg className="w-4 h-4 mr-1 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                    </svg>
-                  )}
-                  {kb.Status === 'Failed' && (
-                    <svg className="w-4 h-4 mr-1 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  )}
-                  {kb.Status !== 'Success' && kb.Status !== 'Failed' && (
-                    <svg className="w-4 h-4 mr-1 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01" />
-                    </svg>
-                  )}
-                  <span>{kb.Status}</span>
-                </span>
-              </td>
-            </tr>
-          ))}
-        </tbody>
+                <tbody>
+                  {status.details.map((kb, idx) => (
+                    <tr key={idx} className="border-b last:border-b-0 hover:bg-gray-50">
+                      <td className="px-4 py-2 font-mono text-indigo-700">KB{kb.KB}</td>
+                      <td className="px-4 py-2">
+                        <div className="flex items-center space-x-2">
+                          <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold space-x-1
+                            ${kb.Status === 'Success' || kb.Status === 'Already Installed' ? 'bg-green-100 text-green-700' :
+                              kb.Status === 'Failed' ? 'bg-red-100 text-red-700' :
+                              'bg-yellow-100 text-yellow-700'}`}
+                          >
+                            {(kb.Status === 'Success' || kb.Status === 'Already Installed') && (
+                              <svg className="w-4 h-4 mr-1 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                              </svg>
+                            )}
+                            {kb.Status === 'Failed' && (
+                              <svg className="w-4 h-4 mr-1 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                              </svg>
+                            )}
+                            {kb.Status !== 'Success' && kb.Status !== 'Failed' && kb.Status !== 'Already Installed' && (
+                              <svg className="w-4 h-4 mr-1 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01" />
+                              </svg>
+                            )}
+                            <span>{kb.Status}</span>
+                          </span>
+
+                          {kb.RebootRequired && (
+                            <span
+                              title="Reboot required"
+                              className="text-xs text-red-600 bg-red-100 rounded px-2 py-0.5 font-semibold flex items-center"
+                            >
+                              🔁 Reboot
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
       </table>
     </div>
   </div>
